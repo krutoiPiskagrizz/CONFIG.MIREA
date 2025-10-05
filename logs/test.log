@@ -1,0 +1,2 @@
+<?xml version='1.0' encoding='utf-8'?>
+<emulator_log><event><timestamp>2025-10-05T16:01:36.755513</timestamp><command>startup</command><message>Эмулятор запущен с параметрами: VFS=vfs_complex, LOG=logs/test.log, SCRIPT=vfs_demo_script.sh</message><current_dir>/</current_dir></event><event><timestamp>2025-10-05T16:01:45.969590</timestamp><command>help</command><message>Выполнение команды: help</message><current_dir>/</current_dir></event></emulator_log>
