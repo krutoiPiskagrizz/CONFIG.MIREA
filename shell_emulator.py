@@ -7,6 +7,8 @@ import logging
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import subprocess
+import platform
+from collections import defaultdict
 
 class VFSNode:
     """Узел виртуальной файловой системы"""
@@ -38,15 +40,26 @@ class VirtualFileSystem:
         user = self.mkdir("user", home)
         
         # Создаем несколько тестовых файлов и папок
-        self.mkdir("documents", user)
-        self.mkdir("downloads", user)
-        self.create_file("readme.txt", user, "Добро пожаловать в эмулятор!")
-        self.create_file("test.py", user, "print('Hello World')")
+        documents = self.mkdir("documents", user)
+        downloads = self.mkdir("downloads", user)
+        
+        # Создаем тестовые файлы с разным содержимым
+        self.create_file("readme.txt", user, "Добро пожаловать в эмулятор!\nЭто файл readme.")
+        self.create_file("test.py", user, "print('Hello World')\n\nclass Test:\n    def method(self):\n        return True")
+        self.create_file("data.txt", user, "Строка 1\nСтрока 2\nСтрока 3\nСтрока 4\nСтрока 5")
+        self.create_file("empty.txt", user, "")
+        
+        self.create_file("report.md", documents, "# Отчет\n\n## Раздел 1\nТекст раздела 1\n\n## Раздел 2\nТекст раздела 2")
+        self.create_file("notes.txt", documents, "Заметка 1\nЗаметка 2\nЗаметка 3")
         
         # Создаем системуные директории
-        self.mkdir("etc", self.root)
+        etc = self.mkdir("etc", self.root)
         self.mkdir("var", self.root)
         self.mkdir("tmp", self.root)
+        
+        # Создаем конфигурационные файлы
+        self.create_file("version", etc, "EmulatorOS 1.0")
+        self.create_file("hostname", etc, "emulator-host")
     
     def load_from_physical_path(self, physical_path):
         """Загрузка VFS из физической директории"""
@@ -122,6 +135,14 @@ class VirtualFileSystem:
                 self.current_dir = self.current_dir.parent
             return True
         
+        if path == "~":
+            # Переход в домашнюю директорию (/home/user)
+            home_user = self._find_node("/home/user")
+            if home_user:
+                self.current_dir = home_user
+                return True
+            return False
+        
         # Поиск по относительному пути
         target_dir = self.current_dir
         parts = path.split('/')
@@ -136,6 +157,12 @@ class VirtualFileSystem:
                 continue
             elif part == ".":
                 continue
+            elif part == "~":
+                home_user = self._find_node("/home/user")
+                if home_user:
+                    target_dir = home_user
+                else:
+                    return False
             elif part in target_dir.children and target_dir.children[part].is_directory:
                 target_dir = target_dir.children[part]
             else:
@@ -143,6 +170,22 @@ class VirtualFileSystem:
         
         self.current_dir = target_dir
         return True
+    
+    def _find_node(self, path):
+        """Поиск узла по абсолютному пути"""
+        if path == "/":
+            return self.root
+        
+        parts = path.strip('/').split('/')
+        current = self.root
+        
+        for part in parts:
+            if part in current.children:
+                current = current.children[part]
+            else:
+                return None
+        
+        return current
     
     def get_current_path(self):
         """Получение текущего пути в VFS"""
@@ -155,7 +198,7 @@ class VirtualFileSystem:
         
         return "/" + "/".join(reversed(path_parts)) if path_parts else "/"
     
-    def list_directory(self, path=None):
+    def list_directory(self, path=None, show_hidden=False, long_format=False):
         """Список содержимого директории"""
         target_dir = self.current_dir
         
@@ -173,12 +216,44 @@ class VirtualFileSystem:
         
         items = []
         for name, node in target_dir.children.items():
-            if node.is_directory:
-                items.append(f"{name}/")
+            # Пропускаем скрытые файлы если не запрошены
+            if not show_hidden and name.startswith('.'):
+                continue
+                
+            if long_format:
+                # Длинный формат: тип, размер, имя
+                if node.is_directory:
+                    item_type = "d"
+                    size = "4096"  # Размер директории
+                else:
+                    item_type = "-"
+                    size = str(len(node.content.encode('utf-8')))  # Размер файла в байтах
+                
+                items.append(f"{item_type}rw-r--r-- 1 user user {size} Jan 01 00:00 {name}{'/' if node.is_directory else ''}")
             else:
-                items.append(name)
+                # Короткий формат
+                items.append(f"{name}{'/' if node.is_directory else ''}")
         
         return sorted(items)
+    
+    def get_file_stats(self, filename):
+        """Получение статистики файла для wc"""
+        current_dir = self.current_dir
+        
+        if filename in current_dir.children and not current_dir.children[filename].is_directory:
+            content = current_dir.children[filename].content
+            lines = content.split('\n')
+            words = content.split()
+            chars = len(content)
+            
+            return {
+                'lines': len(lines) if content else 0,
+                'words': len(words),
+                'chars': chars,
+                'bytes': len(content.encode('utf-8'))
+            }
+        
+        return None
     
     def get_motd(self):
         """Получение сообщения MOTD из корня VFS"""
@@ -373,6 +448,10 @@ class ShellEmulator:
             self.cmd_pwd(args)
         elif command == "cat":
             self.cmd_cat(args)
+        elif command == "uname":
+            self.cmd_uname(args)
+        elif command == "wc":
+            self.cmd_wc(args)
         else:
             error_msg = f"Ошибка: неизвестная команда '{command}'"
             self.output_area_insert(f"{error_msg}\n")
@@ -391,9 +470,24 @@ class ShellEmulator:
         self.show_prompt()
         
     def cmd_ls(self, args):
-        """Команда ls - список файлов VFS"""
-        path = args[0] if args else None
-        items = self.vfs.list_directory(path)
+        """Команда ls - список файлов VFS с поддержкой опций"""
+        show_hidden = False
+        long_format = False
+        path = None
+        
+        # Парсинг аргументов
+        i = 0
+        while i < len(args):
+            if args[i].startswith('-'):
+                if 'a' in args[i]:
+                    show_hidden = True
+                if 'l' in args[i]:
+                    long_format = True
+            else:
+                path = args[i]
+            i += 1
+        
+        items = self.vfs.list_directory(path, show_hidden, long_format)
         
         if items is None:
             error_msg = f"Ошибка: директория '{path}' не найдена"
@@ -405,15 +499,14 @@ class ShellEmulator:
             self.output_area_insert("Директория пуста\n")
             return
             
-        # Вывод в столбик (упрощенный)
+        # Вывод
         for item in items:
-            self.output_area_insert(f"{item}  ")
-        self.output_area_insert("\n")
+            self.output_area_insert(f"{item}\n")
         
     def cmd_cd(self, args):
         """Команда cd - смена директории VFS"""
         if len(args) == 0:
-            path = "/home/user"
+            path = "~"  # Домашняя директория
         elif len(args) == 1:
             path = args[0]
         else:
@@ -437,16 +530,127 @@ class ShellEmulator:
             self.log_event("cat", "Не указан файл", error=error_msg)
             return
             
-        filename = args[0]
-        current_dir = self.vfs.current_dir
+        for filename in args:
+            current_dir = self.vfs.current_dir
+            
+            if filename in current_dir.children and not current_dir.children[filename].is_directory:
+                file_content = current_dir.children[filename].content
+                self.output_area_insert(f"{file_content}\n")
+            else:
+                error_msg = f"Ошибка: файл '{filename}' не найден"
+                self.output_area_insert(f"{error_msg}\n")
+                self.log_event("cat", f"Файл не найден: {filename}", error=error_msg)
+    
+    def cmd_uname(self, args):
+        """Команда uname - информация о системе"""
+        show_all = False
+        show_kernel = False
+        show_hostname = False
         
-        if filename in current_dir.children and not current_dir.children[filename].is_directory:
-            file_content = current_dir.children[filename].content
-            self.output_area_insert(f"{file_content}\n")
+        # Парсинг аргументов
+        for arg in args:
+            if arg == "-a":
+                show_all = True
+            elif arg == "-s":
+                show_kernel = True
+            elif arg == "-n":
+                show_hostname = True
+        
+        # Если нет аргументов или показать все
+        if not args or show_all:
+            self.output_area_insert(f"EmulatorOS 1.0 {self.hostname} 2024-01-01\n")
+        elif show_kernel:
+            self.output_area_insert("EmulatorOS\n")
+        elif show_hostname:
+            self.output_area_insert(f"{self.hostname}\n")
         else:
-            error_msg = f"Ошибка: файл '{filename}' не найден"
-            self.output_area_insert(f"{error_msg}\n")
-            self.log_event("cat", f"Файл не найден: {filename}", error=error_msg)
+            self.output_area_insert("EmulatorOS\n")
+    
+    def cmd_wc(self, args):
+        """Команда wc - подсчет строк, слов, символов"""
+        count_lines = True
+        count_words = True
+        count_chars = True
+        count_bytes = False
+        filenames = []
+        
+        # Парсинг аргументов
+        for arg in args:
+            if arg.startswith('-'):
+                if 'l' in arg:
+                    count_lines = True
+                    count_words = False
+                    count_chars = False
+                    count_bytes = False
+                if 'w' in arg:
+                    count_lines = False
+                    count_words = True
+                    count_chars = False
+                    count_bytes = False
+                if 'm' in arg:
+                    count_lines = False
+                    count_words = False
+                    count_chars = True
+                    count_bytes = False
+                if 'c' in arg:
+                    count_lines = False
+                    count_words = False
+                    count_chars = False
+                    count_bytes = True
+            else:
+                filenames.append(arg)
+        
+        # Если файлы не указаны, используем stdin (не реализовано)
+        if not filenames:
+            self.output_area_insert("Ошибка: wc требует указания файлов\n")
+            return
+        
+        total_lines = 0
+        total_words = 0
+        total_chars = 0
+        total_bytes = 0
+        
+        for filename in filenames:
+            stats = self.vfs.get_file_stats(filename)
+            if stats:
+                # Вывод статистики для файла
+                output_parts = []
+                if count_lines:
+                    output_parts.append(str(stats['lines']))
+                if count_words:
+                    output_parts.append(str(stats['words']))
+                if count_chars:
+                    output_parts.append(str(stats['chars']))
+                if count_bytes:
+                    output_parts.append(str(stats['bytes']))
+                
+                output_parts.append(filename)
+                self.output_area_insert(" ".join(output_parts) + "\n")
+                
+                # Суммируем для общего итога
+                total_lines += stats['lines']
+                total_words += stats['words']
+                total_chars += stats['chars']
+                total_bytes += stats['bytes']
+            else:
+                error_msg = f"Ошибка: файл '{filename}' не найден"
+                self.output_area_insert(f"{error_msg}\n")
+                self.log_event("wc", f"Файл не найден: {filename}", error=error_msg)
+        
+        # Вывод общего итога если несколько файлов
+        if len(filenames) > 1:
+            output_parts = []
+            if count_lines:
+                output_parts.append(str(total_lines))
+            if count_words:
+                output_parts.append(str(total_words))
+            if count_chars:
+                output_parts.append(str(total_chars))
+            if count_bytes:
+                output_parts.append(str(total_bytes))
+            
+            output_parts.append("total")
+            self.output_area_insert(" ".join(output_parts) + "\n")
             
     def cmd_echo(self, args):
         """Команда echo - вывод аргументов"""
@@ -459,13 +663,15 @@ class ShellEmulator:
     def cmd_help(self):
         """Команда help - показывает список доступных команд"""
         self.output_area_insert("Доступные команды:\n")
-        self.output_area_insert("  ls [путь] - список файлов и директорий\n")
-        self.output_area_insert("  cd [путь] - смена директории\n")
-        self.output_area_insert("  cat [файл] - вывод содержимого файла\n")
-        self.output_area_insert("  echo [текст] - вывод текста\n")
-        self.output_area_insert("  pwd - показать текущую директорию\n")
-        self.output_area_insert("  exit - выход из эмулятора\n")
-        self.output_area_insert("  help - эта справка\n")
+        self.output_area_insert("  ls [-al] [путь]    - список файлов\n")
+        self.output_area_insert("  cd [путь]          - смена директории\n")
+        self.output_area_insert("  cat [файл...]      - вывод содержимого файлов\n")
+        self.output_area_insert("  echo [текст]       - вывод текста\n")
+        self.output_area_insert("  pwd                - показать текущую директорию\n")
+        self.output_area_insert("  uname [-a]         - информация о системе\n")
+        self.output_area_insert("  wc [-lwm] [файл...]- подсчет строк, слов, символов\n")
+        self.output_area_insert("  exit               - выход из эмулятора\n")
+        self.output_area_insert("  help               - эта справка\n")
 
 def parse_arguments():
     """Парсинг аргументов командной строки"""
