@@ -42,15 +42,23 @@ class VirtualFileSystem:
         # Создаем несколько тестовых файлов и папок
         documents = self.mkdir("documents", user)
         downloads = self.mkdir("downloads", user)
+        temp = self.mkdir("temp", user)
         
         # Создаем тестовые файлы с разным содержимым
         self.create_file("readme.txt", user, "Добро пожаловать в эмулятор!\nЭто файл readme.")
         self.create_file("test.py", user, "print('Hello World')\n\nclass Test:\n    def method(self):\n        return True")
         self.create_file("data.txt", user, "Строка 1\nСтрока 2\nСтрока 3\nСтрока 4\nСтрока 5")
         self.create_file("empty.txt", user, "")
+        self.create_file("source.txt", temp, "Исходный файл для копирования\nСодержимое исходного файла")
         
         self.create_file("report.md", documents, "# Отчет\n\n## Раздел 1\nТекст раздела 1\n\n## Раздел 2\nТекст раздела 2")
         self.create_file("notes.txt", documents, "Заметка 1\nЗаметка 2\nЗаметка 3")
+        
+        # Создаем тестовые директории для rmdir
+        self.mkdir("empty_dir", user)
+        self.mkdir("dir_with_files", user)
+        self.create_file("file1.txt", self.mkdir("dir_with_files", user), "Файл 1")
+        self.create_file("file2.txt", self.mkdir("dir_with_files", user), "Файл 2")
         
         # Создаем системуные директории
         etc = self.mkdir("etc", self.root)
@@ -123,6 +131,51 @@ class VirtualFileSystem:
         new_file.parent = parent
         parent.children[name] = new_file
         return new_file
+    
+    def remove_directory(self, name, parent=None):
+        """Удаление директории из VFS"""
+        if parent is None:
+            parent = self.current_dir
+        
+        if not parent.is_directory:
+            return False, "Родительский узел не является директорией"
+        
+        if name not in parent.children:
+            return False, f"Директория '{name}' не найдена"
+        
+        node = parent.children[name]
+        
+        if not node.is_directory:
+            return False, f"'{name}' не является директорией"
+        
+        if node.children and len(node.children) > 0:
+            return False, f"Директория '{name}' не пуста"
+        
+        # Удаляем директорию
+        del parent.children[name]
+        return True, f"Директория '{name}' удалена"
+    
+    def copy_file(self, source_name, target_name, source_parent=None, target_parent=None):
+        """Копирование файла в VFS"""
+        if source_parent is None:
+            source_parent = self.current_dir
+        if target_parent is None:
+            target_parent = self.current_dir
+        
+        if not source_parent.is_directory or not target_parent.is_directory:
+            return False, "Родительские узлы не являются директориями"
+        
+        if source_name not in source_parent.children:
+            return False, f"Исходный файл '{source_name}' не найден"
+        
+        source_node = source_parent.children[source_name]
+        
+        if source_node.is_directory:
+            return False, f"'{source_name}' является директорией (используйте рекурсивное копирование)"
+        
+        # Создаем копию файла
+        self.create_file(target_name, target_parent, source_node.content)
+        return True, f"Файл '{source_name}' скопирован в '{target_name}'"
     
     def change_directory(self, path):
         """Смена текущей директории в VFS"""
@@ -452,6 +505,10 @@ class ShellEmulator:
             self.cmd_uname(args)
         elif command == "wc":
             self.cmd_wc(args)
+        elif command == "rmdir":
+            self.cmd_rmdir(args)
+        elif command == "cp":
+            self.cmd_cp(args)
         else:
             error_msg = f"Ошибка: неизвестная команда '{command}'"
             self.output_area_insert(f"{error_msg}\n")
@@ -651,6 +708,40 @@ class ShellEmulator:
             
             output_parts.append("total")
             self.output_area_insert(" ".join(output_parts) + "\n")
+    
+    def cmd_rmdir(self, args):
+        """Команда rmdir - удаление пустых директорий"""
+        if not args:
+            error_msg = "Ошибка: не указана директория для удаления"
+            self.output_area_insert(f"{error_msg}\n")
+            self.log_event("rmdir", "Не указана директория", error=error_msg)
+            return
+        
+        for dirname in args:
+            success, message = self.vfs.remove_directory(dirname)
+            if success:
+                self.output_area_insert(f"{message}\n")
+            else:
+                self.output_area_insert(f"rmdir: {message}\n")
+                self.log_event("rmdir", f"Ошибка удаления: {dirname}", error=message)
+    
+    def cmd_cp(self, args):
+        """Команда cp - копирование файлов"""
+        if len(args) < 2:
+            error_msg = "Ошибка: недостаточно аргументов. Использование: cp исходный_файл целевой_файл"
+            self.output_area_insert(f"{error_msg}\n")
+            self.log_event("cp", "Недостаточно аргументов", error=error_msg)
+            return
+        
+        source_name = args[0]
+        target_name = args[1]
+        
+        success, message = self.vfs.copy_file(source_name, target_name)
+        if success:
+            self.output_area_insert(f"{message}\n")
+        else:
+            self.output_area_insert(f"cp: {message}\n")
+            self.log_event("cp", f"Ошибка копирования: {source_name} -> {target_name}", error=message)
             
     def cmd_echo(self, args):
         """Команда echo - вывод аргументов"""
@@ -670,6 +761,8 @@ class ShellEmulator:
         self.output_area_insert("  pwd                - показать текущую директорию\n")
         self.output_area_insert("  uname [-a]         - информация о системе\n")
         self.output_area_insert("  wc [-lwm] [файл...]- подсчет строк, слов, символов\n")
+        self.output_area.insert("  rmdir [директория] - удаление пустых директорий\n")
+        self.output_area.insert("  cp исходный целевой - копирование файлов\n")
         self.output_area_insert("  exit               - выход из эмулятора\n")
         self.output_area_insert("  help               - эта справка\n")
 
